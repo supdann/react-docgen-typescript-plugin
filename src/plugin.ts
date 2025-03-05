@@ -5,7 +5,7 @@ import * as docGen from "react-docgen-typescript";
 import { matcher } from "micromatch";
 import * as webpack from "webpack";
 import findCacheDir from "find-cache-dir";
-import flatCache from "flat-cache";
+import { FlatCache } from 'flat-cache';
 import crypto from "crypto";
 
 import { LoaderOptions } from "./types";
@@ -62,10 +62,16 @@ const matchGlob = (globs?: string[]) => {
     Boolean(filename && matchers.find((match) => match(filename)));
 };
 
-// The cache is used only with webpack 4 for now as webpack 5 comes with caching of its own
+// Create cache instance with modern options
 const cacheId = "ts-docgen";
 const cacheDir = findCacheDir({ name: cacheId });
-const cache = flatCache.load(cacheId, cacheDir);
+const cache = new FlatCache({
+  cacheId,
+  cacheDir,
+  ttl: 24 * 60 * 60 * 1000, // 24 hours 
+  lruSize: 10000, // Limit cache size
+  persistInterval: 5 * 60 * 1000 // Save every 5 minutes
+});
 
 /** Run the docgen parser and inject the result into the output */
 /** This is used for webpack 4 or earlier */
@@ -86,7 +92,8 @@ function processModule(
     // eslint-disable-next-line
     .update(webpackModule._source._value)
     .digest("hex");
-  const cached = cache.getKey(hash);
+  
+  const cached = cache.get(hash);
 
   if (cached) {
     // eslint-disable-next-line
@@ -130,6 +137,9 @@ function processModule(
   // @ts-ignore: Webpack 4 type
   // eslint-disable-next-line
   webpackModule._source._value = sourceWithDocs;
+  
+  // Cache is auto-persisted via persistInterval
+  cache.set(hash, sourceWithDocs);
 }
 
 /** Inject typescript docgen information into modules at the end of a build */
@@ -148,6 +158,11 @@ export default class DocgenPlugin implements webpack.WebpackPluginInstance {
   }
 
   apply(compiler: webpack.Compiler): void {
+    // Add cleanup hook
+    compiler.hooks.done.tap(this.name, () => {
+      cache.destroy();
+    });
+
     // Property compiler.version is set only starting from webpack 5
     const webpackVersion = compiler.webpack?.version || "";
     const isWebpack5 = parseInt(webpackVersion.split(".")[0], 10) >= 5;
@@ -363,8 +378,6 @@ export default class DocgenPlugin implements webpack.WebpackPluginInstance {
             typePropName: "type",
           })
         );
-
-        cache.save();
       });
     });
   }
